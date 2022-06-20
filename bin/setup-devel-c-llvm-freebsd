@@ -1,0 +1,186 @@
+#!/bin/sh -e
+#L:
+#L:  MIT License
+#L:  
+#l:  Bug reports, feature requests to gemini|https://harkadev.com/oss
+#l:  Copyright (c) 2022 Harkaitz Agirre, harkaitz.aguirre@gmail.com
+#L:
+#L:  Permission is hereby granted, free of charge, to any person obtaining
+#L:  a copy of this software and associated documentation files (the
+#L:  "Software"), to deal in the Software without restriction, including
+#L:  without limitation the rights to use, copy, modify, merge, publish,
+#L:  distribute, sublicense, and/or sell copies of the Software, and to
+#L:  permit persons to whom the Software is furnished to do so, subject to
+#L:  the following conditions:
+#L:
+#L:  The above copyright notice and this permission notice shall be
+#L:  included in all copies or substantial portions of the Software.
+#L:
+#L:  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+#L:  EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+#L:  MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+#L:  NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
+#L:  LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+#L:  OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
+#L:  WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+##:
+#h: Usage: $0 ...
+#h:
+#h: ... show       : Show configuration.
+#h: ... i-tooldir  : Install prefix.
+#h: ... i-binutils : Install binutils.
+#h: ... i-wrappers : Install clang/clang++ wrappers.
+#h: ... i-sysroot  : Download and install sysroot.
+#h: ... i-scripts  : Install environment script.
+#h: ... all        : Build all missing parts of the toolchain.
+#h: ... all-force  : Build all the toolchain.
+. sysroot-fix
+. getsrc-tar
+. getsrc-cached
+. hmain
+. hlog
+. vrun
+. vcd
+. lrun
+setup_devel_c_llvm_freebsd() {
+    local cmd="$1"
+    shift
+    case "${cmd}" in
+        show)       setup_devel_c_llvm_freebsd_show_variables ;;
+        i-tooldir)  freebsd_create_tooldir                  ;;
+        i-binutils) freebsd_binutils                        ;;
+        i-wrappers) freebsd_wrappers                        ;;
+        i-sysroot)  freebsd_sysroot                         ;;
+        i-scripts)  freebsd_scripts                         ;;
+        all)        freebsd_all                             ;;
+        all-force)  FORCE=y freebsd_all                     ;;
+        *)          hlog error "Invalid arguments: ${cmd}."; return 1 ;;
+    esac
+}
+setup_devel_c_llvm_freebsd_show_variables() {
+    printf '%-20s %s\n'                                           \
+           ""                      ""                             \
+           "## SETTINGS"           ""                             \
+           ""                      ""                             \
+           FREEBSD_BINUTILS_V      ": ${FREEBSD_BINUTILS_V}"      \
+           FREEBSD_SYSROOT_AMD64_V ": ${FREEBSD_SYSROOT_AMD64_V}" \
+           ""                      ""                             \
+           "## DIRECTORIES"        ""                             \
+           ""                      ""                             \
+           FREEBSD_TARGET          ": ${FREEBSD_TARGET}"          \
+           FREEBSD_TOOLDIR         ": ${FREEBSD_TOOLDIR}"         \
+           FREEBSD_SYSROOT         ": ${FREEBSD_SYSROOT}"         \
+           FREEBSD_SCRDIR          ": ${FREEBSD_SCRDIR}"
+}
+setup_devel_c_llvm_freebsd_calc_variables() {
+    ## URLS
+    FREEBSD_BINUTILS_V="${FREEBSD_BINUTILS_V:-2.37}"
+    FREEBSD_SYSROOT_AMD64_V="${FREEBSD_SYSROOT_AMD64_V:-amd64/12.3-RELEASE}"
+    ## DIRECTORIES
+    FREEBSD_TARGET="x86_64-pc-freebsd12"
+    FREEBSD_TOOLDIR="${FREEBSD_TOOLDIR:-/opt/toolchain-freebsd}"
+    FREEBSD_SYSROOT="${FREEBSD_SYSROOT:-${FREEBSD_TOOLDIR}/${FREEBSD_TARGET}}"
+    FREEBSD_SCRDIR="${FREEBSD_SCRDIR:-/usr/local/bin}"
+}
+## -----------------------------------------------------------------------------
+freebsd_create_tooldir() {
+    vrun sudo mkdir -p                     "${FREEBSD_TOOLDIR}" "${FREEBSD_SYSROOT}"
+    vrun sudo chown -R "`whoami`:`whoami`" "${FREEBSD_TOOLDIR}" "${FREEBSD_SYSROOT}"
+}
+freebsd_binutils() {
+    local v="${FREEBSD_BINUTILS_V}" pwd="`pwd`"
+    local url="http://ftp.gnu.org/gnu/binutils/binutils-${v}.tar.bz2"
+    local src="`getsrc_tar "${url}"`"
+    vcd + "${src}"
+    vrun make clean     || true
+    vrun make distclean || true
+    vrun ./configure                              \
+         --prefix="${FREEBSD_TOOLDIR}"            \
+         --target="${FREEBSD_TARGET}"             \
+         --with-sysroot="${FREEBSD_SYSROOT}"      \
+         --with-lib-path="${FREEBSD_SYSROOT}/lib" \
+         --disable-nls        \
+         --disable-static     \
+         --enable-64-bit-bfd  \
+         --disable-multilib   \
+         --enable-gold=yes    \
+         --enable-plugins     \
+         --enable-threads     \
+         --disable-werror     \
+         CC=clang CXX=clang++
+    vrun make
+    vrun make install
+    vcd - "${pwd}"
+}
+freebsd_wrappers() {
+    local x=
+    local clang="${FREEBSD_TOOLDIR}/bin/${FREEBSD_TARGET}-clang"
+    local clangpp="${FREEBSD_TOOLDIR}/bin/${FREEBSD_TARGET}-clang++"
+    for x in "${clang}" "${clangpp}";do
+        hlog info "Creating ${x} ..."
+        mkdir -p "`dirname "${x}"`"
+        if true;then
+            echo '#!/bin/sh -e'
+            echo 'export LANG=C'
+            echo 'export LD_LIBRARY_PATH='
+            case "${x}" in
+                *-clang++) echo "exec clang++ \\";;
+                *-clang)   echo "exec clang   \\";;
+            esac
+            echo "    -target  x86_64-unknown-freebsd10.0              \\"
+            echo "    -isystem ${FREEBSD_SYSROOT}/usr/local/include    \\"
+            echo "    -isystem ${FREEBSD_SYSROOT}/usr/include          \\"
+            echo "    -Wl,-rpath-link,${FREEBSD_SYSROOT}/usr/local/lib \\"
+            echo "    -Wl,-rpath-link,${FREEBSD_SYSROOT}/usr/lib       \\"
+            echo "    -Wl,-rpath-link,${FREEBSD_SYSROOT}/lib           \\"
+            echo "    --sysroot=${FREEBSD_SYSROOT}/                    \\"
+            echo "    \"\$@\"                                          \\"
+            echo "    -Wno-unused-command-line-argument                \\"
+            echo "    -lexecinfo"
+        fi > "${x}"
+        chmod +x "${x}"
+    done
+}
+freebsd_sysroot() {
+    local v="${FREEBSD_SYSROOT_AMD64_V}"
+    local url="http://ftp.plusline.de/FreeBSD/releases/${v}/base.txz"
+    local tar="`getsrc_cached -n freebsd-base.txz "${url}"`"
+    test -n "${tar}"
+    vrun tar xf "${tar}" -C "${FREEBSD_SYSROOT}"
+    vrun sysroot_fix -lkp "${FREEBSD_SYSROOT}"
+}
+freebsd_scripts() {
+    local w="${FREEBSD_SCRDIR}/${FREEBSD_TARGET}-env"
+    hlog info "Creating ${w} ..."
+    sudo tee "${w}" <<-EOF >/dev/null
+	#!/bin/sh -e
+	. hcross-env-c
+	hcross_env_c                              \\
+	    type=clang                            \\
+	    path="${FREEBSD_TOOLDIR}/bin"         \\
+	    tool_prefix="${FREEBSD_TARGET}-"      \\
+	    prefix="${FREEBSD_SYSROOT}/usr/local" \\
+	    prefixes="${FREEBSD_SYSROOT}/usr/local ${FREEBSD_SYSROOT}/usr ${FREEBSD_SYSROOT}"
+	EOF
+    sudo chmod +x "${w}"
+}
+## -----------------------------------------------------------------------------
+freebsd_all() {
+    hlog info "Started: `date`"
+    if test ! -f "${FREEBSD_TOOLDIR}/bin/${FREEBSD_TARGET}-ld" || test -n "${FORCE}"; then
+        lrun freebsd-build "freebsd_create_tooldir; freebsd_all"
+    fi
+    if test ! -f "${FREEBSD_SYSROOT}/bin/sh" || test -n "${FORCE}"; then
+        lrun freebsd-sysroot "freebsd_sysroot"
+    fi
+    if true; then
+        lrun freebsd-wrappers "freebsd_wrappers"
+    fi
+    if true; then
+        lrun freebsd-scripts "freebsd_scripts"
+    fi
+    hlog info "Finished: `date`"
+}
+## -----------------------------------------------------------------------------
+setup_devel_c_llvm_freebsd_calc_variables
+hmain -f "setup-devel-c-llvm-freebsd" setup_devel_c_llvm_freebsd "$@"
